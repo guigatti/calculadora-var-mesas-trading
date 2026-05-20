@@ -18,8 +18,12 @@ from utils.risk_engine import (
     var_parametrico, var_monte_carlo_acoes, component_var,
     expected_shortfall_historico, expected_shortfall_normal,
 )
+from utils.session_init import init_session_state
 
 st.set_page_config(page_title="Cálculo de VaR", page_icon="📈", layout="wide")
+
+# Inicializa session_state se necessário (multi-page navigation safety)
+init_session_state()
 
 st.title("📈 Cálculo de VaR por Mesa")
 st.markdown(
