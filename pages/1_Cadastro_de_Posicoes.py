@@ -12,8 +12,12 @@ from pathlib import Path
 # Adicionar pasta raiz ao path para imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.data_loader import carregar_template_posicoes, template_para_excel_bytes
+from utils.session_init import init_session_state
 
 st.set_page_config(page_title="Cadastro de Posições", page_icon="📋", layout="wide")
+
+# Inicializa session_state se necessário (multi-page navigation safety)
+init_session_state()
 
 st.title("📋 Cadastro de Posições")
 st.markdown(
