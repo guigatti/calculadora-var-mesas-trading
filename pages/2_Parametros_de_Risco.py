@@ -10,8 +10,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.data_loader import baixar_precos
 from utils.risk_engine import calcular_retornos, matriz_covariancia
+from utils.session_init import init_session_state
 
 st.set_page_config(page_title="Parâmetros de Risco", page_icon="⚙️", layout="wide")
+
+# Inicializa session_state se necessário (multi-page navigation safety)
+init_session_state()
 
 st.title("⚙️ Parâmetros de Risco e Dados de Mercado")
 st.markdown(
