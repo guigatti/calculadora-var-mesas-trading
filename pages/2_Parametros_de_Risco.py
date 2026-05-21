@@ -4,6 +4,9 @@ pages/2_⚙️_Parâmetros_de_Risco.py
 Configuração dos parâmetros de risco e ingestão de dados de mercado.
 """
 import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
 import sys
 from pathlib import Path
 
@@ -201,7 +204,6 @@ if st.session_state.get('precos') is not None:
         st.metric("De", f"{precos.index[0].date()}")
 
     # Estatísticas dos retornos
-    import numpy as np
     st.markdown("#### Estatísticas dos Retornos Diários")
     desc = pd.DataFrame({
         'Vol Anual (%)': retornos.std() * np.sqrt(252) * 100,
@@ -219,7 +221,6 @@ if st.session_state.get('precos') is not None:
     )
 
     # Gráfico de preços
-    import plotly.graph_objects as go
     precos_norm = precos / precos.iloc[0] * 100
     fig = go.Figure()
     for col in precos_norm.columns:
@@ -233,5 +234,3 @@ if st.session_state.get('precos') is not None:
         template='plotly_white', height=420, hovermode='x unified'
     )
     st.plotly_chart(fig, use_container_width=True)
-
-import pandas as pd  # Garantir import disponível
