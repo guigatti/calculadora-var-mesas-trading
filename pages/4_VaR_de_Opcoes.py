@@ -18,8 +18,12 @@ from utils.risk_engine import (
     var_opcoes_delta, var_opcoes_delta_gamma,
     var_opcoes_full_valuation_historico, var_opcoes_montecarlo,
 )
+from utils.session_init import init_session_state
 
 st.set_page_config(page_title="VaR de Opções", page_icon="🎯", layout="wide")
+
+# Inicializa session_state se necessário (multi-page navigation safety)
+init_session_state()
 
 st.title("🎯 VaR de Opções — Quatro Abordagens Comparadas")
 st.markdown(
