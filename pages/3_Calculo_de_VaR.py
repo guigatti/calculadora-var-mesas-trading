@@ -31,7 +31,9 @@ st.markdown(
     "Inclui decomposição Component VaR e Expected Shortfall."
 )
 
-# Validações
+# ============================================================
+# VALIDAÇÕES
+# ============================================================
 if st.session_state.get('posicoes') is None:
     st.error("❌ Posições não cadastradas. Vá para **Cadastro de Posições**.")
     st.stop()
@@ -39,15 +41,15 @@ if st.session_state.get('retornos') is None:
     st.error("❌ Dados de mercado não carregados. Vá para **Parâmetros de Risco**.")
     st.stop()
 
-posicoes = st.session_state['posicoes']
-retornos = st.session_state['retornos']
+posicoes    = st.session_state['posicoes']
+retornos    = st.session_state['retornos']
 cov_amostral = st.session_state['cov_amostral']
-cov_ewma = st.session_state['cov_ewma']
-params = st.session_state['parametros']
+cov_ewma    = st.session_state['cov_ewma']
+params      = st.session_state['parametros']
 
 # Filtrar apenas posições de ações (opções têm página dedicada)
 posicoes_acoes = posicoes[posicoes['tipo'] == 'acao'].copy()
-mesas_acoes = posicoes_acoes['mesa'].unique().tolist()
+mesas_acoes    = posicoes_acoes['mesa'].unique().tolist()
 
 if not mesas_acoes:
     st.warning(
@@ -55,6 +57,22 @@ if not mesas_acoes:
         "mesas com ações. Para opções, use a página **VaR de Opções**."
     )
     st.stop()
+
+# ============================================================
+# DIAGNÓSTICO DE TICKERS (exibido apenas se houver divergência)
+# ============================================================
+tickers_carteira  = set(posicoes_acoes['ativo'].unique())
+tickers_retornos  = set(retornos.columns)
+tickers_sem_dados = tickers_carteira - tickers_retornos
+
+if tickers_sem_dados:
+    st.warning(
+        f"⚠️ **Atenção — tickers sem dados históricos carregados:** "
+        f"`{', '.join(sorted(tickers_sem_dados))}`\n\n"
+        "Esses ativos não contribuirão para o VaR Histórico. "
+        "Verifique se o formato do ticker está correto (ex: `PETR4.SA`) "
+        "e se os dados foram carregados na página **Parâmetros de Risco**."
+    )
 
 # ============================================================
 # SELEÇÃO DE MESA
@@ -65,15 +83,15 @@ mesa_selecionada = st.selectbox(
     help="Cada mesa é avaliada individualmente. O dashboard executivo consolida todas."
 )
 
-df_mesa = posicoes_acoes[posicoes_acoes['mesa'] == mesa_selecionada].copy()
+df_mesa     = posicoes_acoes[posicoes_acoes['mesa'] == mesa_selecionada].copy()
 limite_mesa = df_mesa['limite_var'].iloc[0]
 
 # Exposições e pesos (suporta long/short)
 df_mesa['valor_posicao'] = df_mesa['quantidade'] * df_mesa['preco']
-exposicoes = df_mesa.set_index('ativo')['valor_posicao']
+exposicoes  = df_mesa.set_index('ativo')['valor_posicao']
 valor_bruto = exposicoes.abs().sum()
 valor_liquido = exposicoes.sum()
-pesos = exposicoes / valor_bruto
+pesos       = exposicoes / valor_bruto
 
 # ============================================================
 # CABEÇALHO DA MESA
@@ -102,44 +120,85 @@ st.divider()
 st.subheader("Cálculo das Três Metodologias")
 
 with st.spinner("Calculando VaR pelas três metodologias..."):
-    # Retornos da carteira
+
+    # Retornos ponderados da carteira
     retornos_carteira = calcular_retornos_carteira(retornos, pesos)
 
-    # VaR Histórico
-    r_hist = var_historico(
-        retornos_carteira, valor_bruto,
-        params['nivel_confianca'], params['horizonte_dias']
-    )
-    # VaR Histórico EWMA
-    r_hist_ewma = var_historico_ewma(
-        retornos_carteira, valor_bruto,
-        params['nivel_confianca'], 0.97, params['horizonte_dias']
-    )
-    # VaR Paramétrico Normal (amostral)
+    # ── VaR Histórico ──────────────────────────────────────
+    try:
+        r_hist = var_historico(
+            retornos_carteira, valor_bruto,
+            params['nivel_confianca'], params['horizonte_dias']
+        )
+    except ValueError as e:
+        st.error(f"**VaR Histórico:** {e}")
+        st.stop()
+
+    # ── VaR Histórico EWMA ─────────────────────────────────
+    try:
+        r_hist_ewma = var_historico_ewma(
+            retornos_carteira, valor_bruto,
+            params['nivel_confianca'], 0.97, params['horizonte_dias']
+        )
+    except ValueError as e:
+        st.error(f"**VaR Histórico EWMA:** {e}")
+        st.stop()
+
+    # ── VaR Paramétrico Normal (amostral) ──────────────────
     r_param = var_parametrico(
         pesos, cov_amostral, valor_bruto,
         params['nivel_confianca'], params['horizonte_dias']
     )
-    # VaR Paramétrico EWMA
+
+    # ── VaR Paramétrico EWMA ───────────────────────────────
     r_param_ewma = var_parametrico(
         pesos, cov_ewma, valor_bruto,
         params['nivel_confianca'], params['horizonte_dias']
     )
-    # VaR Monte Carlo
-    qtd = df_mesa.set_index('ativo')['quantidade']
+
+    # ── VaR Monte Carlo ────────────────────────────────────
+    qtd           = df_mesa.set_index('ativo')['quantidade']
     precos_atuais = df_mesa.set_index('ativo')['preco']
-    cov_filtrada = cov_amostral.loc[qtd.index, qtd.index]
+
+    # Filtra a cov_matrix para conter só os ativos da mesa com dados
+    ativos_com_dados = [a for a in qtd.index if a in cov_amostral.index]
+    if not ativos_com_dados:
+        st.error(
+            "Nenhum ativo da mesa possui dados históricos na matriz de covariância. "
+            "Verifique os tickers na página **Parâmetros de Risco**."
+        )
+        st.stop()
+
+    cov_filtrada = cov_amostral.loc[ativos_com_dados, ativos_com_dados]
     r_mc = var_monte_carlo_acoes(
-        precos_atuais, qtd, cov_filtrada,
+        precos_atuais.reindex(ativos_com_dados),
+        qtd.reindex(ativos_com_dados),
+        cov_filtrada,
         n_simulacoes=params['n_simulacoes'],
         nivel_confianca=params['nivel_confianca'],
         horizonte_dias=params['horizonte_dias'],
         seed=42
     )
 
-    # Expected Shortfall
-    es_hist = expected_shortfall_historico(retornos_carteira, valor_bruto, 0.975)
+    # ── Expected Shortfall ─────────────────────────────────
+    try:
+        es_hist = expected_shortfall_historico(retornos_carteira, valor_bruto, 0.975)
+    except ValueError as e:
+        st.warning(f"ES Histórico não calculado: {e}")
+        es_hist = {'es_financeiro': np.nan}
+
     es_normal = expected_shortfall_normal(pesos, cov_amostral, valor_bruto, 0.975)
+
+# Aviso de observações usadas
+n_obs = r_hist.get('n_observacoes', 0)
+if n_obs < 60:
+    st.warning(
+        f"⚠️ VaR Histórico calculado com apenas **{n_obs} observações** "
+        "(recomendado: ≥ 252). O resultado pode não ser representativo. "
+        "Aumente a janela histórica em **Parâmetros de Risco**."
+    )
+else:
+    st.caption(f"ℹ️ VaR Histórico baseado em {n_obs} observações diárias.")
 
 # ============================================================
 # TABELA DE RESULTADOS
@@ -179,16 +238,21 @@ st.dataframe(
 st.markdown("#### Expected Shortfall (97.5%)")
 col_es1, col_es2 = st.columns(2)
 with col_es1:
-    st.metric(
-        "ES Histórico (média da cauda)",
-        f"R$ {es_hist['es_financeiro']:,.2f}",
-        delta=f"{(es_hist['es_financeiro']/r_hist['var_financeiro'] - 1)*100:+.1f}% vs VaR Hist 95%"
-    )
+    if not np.isnan(es_hist['es_financeiro']):
+        delta_es = (es_hist['es_financeiro'] / r_hist['var_financeiro'] - 1) * 100
+        st.metric(
+            "ES Histórico (média da cauda)",
+            f"R$ {es_hist['es_financeiro']:,.2f}",
+            delta=f"{delta_es:+.1f}% vs VaR Hist 95%"
+        )
+    else:
+        st.metric("ES Histórico", "N/D")
 with col_es2:
+    delta_esn = (es_normal['es_financeiro'] / r_param['var_financeiro'] - 1) * 100
     st.metric(
         "ES Normal (fórmula fechada)",
         f"R$ {es_normal['es_financeiro']:,.2f}",
-        delta=f"{(es_normal['es_financeiro']/r_param['var_financeiro'] - 1)*100:+.1f}% vs VaR Param 95%"
+        delta=f"{delta_esn:+.1f}% vs VaR Param 95%"
     )
 
 st.caption(
@@ -243,7 +307,6 @@ cvar_df = component_var(
 )
 
 if not cvar_df.empty:
-    # Tabela
     cvar_display = cvar_df[['ativo', 'peso', 'component_var_financeiro', 'contribuicao_pct']].copy()
     cvar_display.columns = ['Ativo', 'Peso (%)', 'Component VaR (R$)', 'Contribuição (%)']
     cvar_display['Peso (%)'] = cvar_display['Peso (%)'] * 100
@@ -256,7 +319,6 @@ if not cvar_df.empty:
         use_container_width=True, hide_index=True
     )
 
-    # Gráfico peso vs. contribuição
     fig_cv = go.Figure()
     fig_cv.add_trace(go.Bar(
         name='Peso financeiro (%)', x=cvar_df['ativo'],
@@ -295,7 +357,6 @@ fig_dist.add_vline(
     annotation_text=f"VaR {params['nivel_confianca']*100:.0f}% = {var_95_ret*100:.2f}%",
     annotation_position='top left'
 )
-# Sombrear cauda
 cauda = retornos_carteira[retornos_carteira <= var_95_ret] * 100
 fig_dist.add_trace(go.Histogram(
     x=cauda, nbinsx=20,
@@ -315,19 +376,24 @@ st.plotly_chart(fig_dist, use_container_width=True)
 if 'resultados_var' not in st.session_state:
     st.session_state['resultados_var'] = {}
 
+# Seleciona o VaR "oficial" com base na metodologia escolhida nos parâmetros
+metodologia_oficial = params.get('metodologia', 'Paramétrico')
+match = resultados[
+    resultados['Metodologia'].str.contains(
+        metodologia_oficial.split()[0], case=False
+    )
+]
+var_oficial = match['VaR (R$)'].iloc[0] if not match.empty else r_param['var_financeiro']
+
 st.session_state['resultados_var'][mesa_selecionada] = {
-    'var_historico': r_hist['var_financeiro'],
+    'var_historico':   r_hist['var_financeiro'],
     'var_paramétrico': r_param['var_financeiro'],
-    'var_montecarlo': r_mc['var_financeiro'],
-    'var_oficial': resultados[resultados['Metodologia'].str.contains(
-        params['metodologia'].split()[0], case=False
-    )]['VaR (R$)'].iloc[0] if not resultados[
-        resultados['Metodologia'].str.contains(params['metodologia'].split()[0], case=False)
-    ].empty else r_param['var_financeiro'],
-    'limite': limite_mesa,
-    'valor_bruto': valor_bruto,
-    'es_historico': es_hist['es_financeiro'],
-    'es_normal': es_normal['es_financeiro'],
+    'var_montecarlo':  r_mc['var_financeiro'],
+    'var_oficial':     var_oficial,
+    'limite':          limite_mesa,
+    'valor_bruto':     valor_bruto,
+    'es_historico':    es_hist['es_financeiro'],
+    'es_normal':       es_normal['es_financeiro'],
 }
 
 st.info(
