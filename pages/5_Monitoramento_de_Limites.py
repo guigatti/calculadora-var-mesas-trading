@@ -17,9 +17,13 @@ from utils.risk_engine import (
     calcular_retornos_carteira, var_parametrico, var_opcoes_montecarlo,
     classificar_utilizacao
 )
+from utils.session_init import init_session_state
 from scipy import stats
 
 st.set_page_config(page_title="Monitoramento de Limites", page_icon="🚦", layout="wide")
+
+# Inicializa session_state se necessário (multi-page navigation safety)
+init_session_state()
 
 st.title("🚦 Monitoramento de Limites por Mesa")
 st.markdown(
