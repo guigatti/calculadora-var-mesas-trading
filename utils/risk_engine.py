@@ -129,16 +129,51 @@ class BlackScholes:
 # ============================================================
 def calcular_retornos_carteira(retornos_ativos: pd.DataFrame,
                                 pesos: pd.Series) -> pd.Series:
-    """Calcula retornos da carteira ponderados pelos pesos."""
+    """
+    Calcula retornos da carteira ponderados pelos pesos.
+
+    FIX: filtra NaN *antes* do produto matricial, considerando apenas as
+    colunas que têm peso efetivo. Isso evita que um ticker sem dados
+    (coluna inteira de NaN do yfinance) propague NaN para toda a série
+    da carteira e esvazie o array depois do dropna().
+    """
     pesos_alinhados = pesos.reindex(retornos_ativos.columns).fillna(0)
-    return retornos_ativos @ pesos_alinhados
+
+    # Apenas colunas com peso efetivo — ignora tickers ausentes
+    cols_com_peso = pesos_alinhados[pesos_alinhados.abs() > 1e-10].index
+    if cols_com_peso.empty:
+        return pd.Series(dtype=float)
+
+    # Descarta linhas com NaN somente nas colunas que importam
+    ret_relevantes = retornos_ativos[cols_com_peso].dropna()
+    pesos_finais = pesos_alinhados.reindex(ret_relevantes.columns).fillna(0)
+    return ret_relevantes @ pesos_finais
 
 
 def var_historico(retornos_carteira, valor_carteira,
                   nivel_confianca=0.95, horizonte_dias=1):
-    """VaR Histórico simples."""
+    """
+    VaR Histórico simples.
+
+    FIX: valida que a série não está vazia após dropna() e lança
+    ValueError com mensagem clara em vez de deixar o NumPy explodir
+    com IndexError interno.
+    """
     alpha = 1 - nivel_confianca
-    percentil = np.percentile(retornos_carteira.dropna(), alpha * 100)
+    ret_limpos = retornos_carteira.dropna()
+
+    if len(ret_limpos) == 0:
+        raise ValueError(
+            "Série de retornos da carteira está vazia após remoção de NaN.\n"
+            "Causas mais comuns:\n"
+            "  1. Ticker sem dados históricos no período selecionado "
+            "(verifique se o ativo foi listado antes da janela configurada).\n"
+            "  2. Formato dos tickers da carteira diferente do retornado pelo "
+            "yfinance — ex: 'PETR4' vs 'PETR4.SA'. Confirme no Cadastro de "
+            "Posições que os tickers estão com o sufixo correto."
+        )
+
+    percentil = np.percentile(ret_limpos, alpha * 100)
     fator_h = np.sqrt(horizonte_dias)
     var_pct = -percentil * fator_h
     return {
@@ -148,14 +183,20 @@ def var_historico(retornos_carteira, valor_carteira,
         'percentil_retorno': percentil,
         'nivel_confianca': nivel_confianca,
         'horizonte_dias': horizonte_dias,
-        'n_observacoes': len(retornos_carteira.dropna()),
+        'n_observacoes': len(ret_limpos),
     }
 
 
 def var_historico_ewma(retornos_carteira, valor_carteira,
                        nivel_confianca=0.95, lambda_decay=0.97, horizonte_dias=1):
-    """VaR Histórico com ponderação exponencial."""
+    """VaR Histórico com ponderação exponencial (age-weighted)."""
     ret = retornos_carteira.dropna()
+
+    if len(ret) == 0:
+        raise ValueError(
+            "Série de retornos vazia. Verifique os tickers e o período histórico."
+        )
+
     n = len(ret)
     alpha = 1 - nivel_confianca
     pesos = (1 - lambda_decay) * lambda_decay ** np.arange(n - 1, -1, -1)
@@ -178,6 +219,12 @@ def expected_shortfall_historico(retornos_carteira, valor_carteira,
                                  nivel_confianca=0.975, horizonte_dias=1):
     """Expected Shortfall histórico — média da cauda."""
     ret = retornos_carteira.dropna()
+
+    if len(ret) == 0:
+        raise ValueError(
+            "Série de retornos vazia. Verifique os tickers e o período histórico."
+        )
+
     alpha = 1 - nivel_confianca
     percentil = np.percentile(ret, alpha * 100)
     cauda = ret[ret <= percentil]
