@@ -19,9 +19,13 @@ from utils.risk_engine import (
     var_historico, var_monte_carlo_acoes,
     calcular_retornos_carteira, classificar_utilizacao
 )
+from utils.session_init import init_session_state
 from scipy import stats
 
 st.set_page_config(page_title="Dashboard Executivo", page_icon="📊", layout="wide")
+
+# Inicializa session_state se necessário (multi-page navigation safety)
+init_session_state()
 
 st.title("📊 Dashboard Executivo")
 st.markdown(
