@@ -22,7 +22,6 @@ from utils.session_init import init_session_state
 
 st.set_page_config(page_title="VaR de Opções", page_icon="🎯", layout="wide")
 
-# Inicializa session_state se necessário (multi-page navigation safety)
 init_session_state()
 
 st.title("🎯 VaR de Opções — Quatro Abordagens Comparadas")
@@ -33,7 +32,9 @@ st.markdown(
     "aproximações simples falham."
 )
 
-# Validações
+# ============================================================
+# VALIDAÇÕES
+# ============================================================
 if st.session_state.get('posicoes') is None:
     st.error("❌ Posições não cadastradas.")
     st.stop()
@@ -41,12 +42,11 @@ if st.session_state.get('retornos') is None:
     st.error("❌ Dados de mercado não carregados.")
     st.stop()
 
-posicoes = st.session_state['posicoes']
-retornos = st.session_state['retornos']
+posicoes     = st.session_state['posicoes']
+retornos     = st.session_state['retornos']
 cov_amostral = st.session_state['cov_amostral']
-params = st.session_state['parametros']
+params       = st.session_state['parametros']
 
-# Filtrar opções
 opcoes = posicoes[posicoes['tipo'].isin(['call', 'put'])].copy()
 
 if opcoes.empty:
@@ -58,6 +58,30 @@ if opcoes.empty:
     st.stop()
 
 # ============================================================
+# UTILITÁRIO: normaliza tickers de underlying → formato yfinance
+# ============================================================
+def _normalizar_ticker(ticker: str, colunas_retornos: set) -> str:
+    """
+    Tenta casar o ticker do cadastro com as colunas de retornos carregadas.
+    Ordem de tentativa:
+      1. Exato                  → 'PETR4.SA' já existe
+      2. Com sufixo .SA         → 'PETR4'    vira 'PETR4.SA'
+      3. Sem sufixo .SA         → 'PETR4.SA' vira 'PETR4'
+    Se não encontrar nenhum, retorna o original (o validador do risk_engine
+    vai reportar o ticker faltante com mensagem clara).
+    """
+    if ticker in colunas_retornos:
+        return ticker
+    com_sa = ticker + '.SA'
+    if com_sa in colunas_retornos:
+        return com_sa
+    sem_sa = ticker.replace('.SA', '')
+    if sem_sa in colunas_retornos:
+        return sem_sa
+    return ticker  # mantém original — será reportado como ausente
+
+
+# ============================================================
 # SELEÇÃO DA MESA DE OPÇÕES
 # ============================================================
 mesas_opcoes = opcoes['mesa'].unique().tolist()
@@ -67,8 +91,32 @@ mesa_op = st.selectbox(
     help="Cada mesa de opções é analisada com as quatro abordagens em separado."
 )
 
-df_mesa_op = opcoes[opcoes['mesa'] == mesa_op].copy()
-limite_op = df_mesa_op['limite_var'].iloc[0]
+df_mesa_op  = opcoes[opcoes['mesa'] == mesa_op].copy()
+limite_op   = df_mesa_op['limite_var'].iloc[0]
+
+# ── Normalização de tickers ────────────────────────────────
+cols_retornos = set(retornos.columns)
+df_mesa_op['underlying'] = df_mesa_op['underlying'].apply(
+    lambda t: _normalizar_ticker(t, cols_retornos)
+)
+
+# Avisa se ainda houver underlyings sem dados após a normalização
+underlyings_sem_dados = [
+    u for u in df_mesa_op['underlying'].unique()
+    if u not in cols_retornos
+]
+if underlyings_sem_dados:
+    st.warning(
+        f"⚠️ **Underlyings sem dados históricos carregados:** "
+        f"`{', '.join(underlyings_sem_dados)}`\n\n"
+        "Opções desses subjacentes serão ignoradas nos cálculos de VaR "
+        "Histórico e Monte Carlo. Verifique o formato do ticker no cadastro "
+        "(deve ser igual ao retornado pelo yfinance, ex: `PETR4.SA`) e "
+        "recarregue os dados em **Parâmetros de Risco**."
+    )
+
+# T_anos calculado aqui — evita depender da coluna existir no cadastro
+df_mesa_op['T_anos'] = df_mesa_op['vencimento_dias_uteis'] / 252
 
 # ============================================================
 # OVERVIEW DA MESA
@@ -101,12 +149,12 @@ st.caption(
 
 greeks_list = []
 for sub in df_mesa_op['underlying'].unique():
-    df_sub = df_mesa_op[df_mesa_op['underlying'] == sub]
+    df_sub  = df_mesa_op[df_mesa_op['underlying'] == sub]
     delta_t = gamma_t = vega_t = theta_t = 0
     for _, op in df_sub.iterrows():
         bs = BlackScholes(
             S=op['preco_subjacente'], K=op['strike'],
-            T=op['vencimento_dias_uteis']/252,
+            T=op['T_anos'],
             r=params['taxa_juros'], sigma=op['vol_implicita'],
             tipo=op['tipo']
         )
@@ -119,7 +167,7 @@ for sub in df_mesa_op['underlying'].unique():
         'Subjacente': sub,
         'S0 (R$)': S0,
         'Δ Delta (R$/+1%S)': delta_t * S0 / 100,
-        'Γ Gamma (R$/(+1%S)²)': gamma_t * (S0**2) / 10000,
+        'Γ Gamma (R$/(+1%S)²)': gamma_t * (S0 ** 2) / 10000,
         'ν Vega (R$/+1%vol)': vega_t,
         'Θ Theta (R$/dia)': theta_t,
     })
@@ -146,59 +194,71 @@ st.dataframe(
 st.divider()
 st.subheader("🔬 Comparação das Quatro Abordagens de VaR")
 
-# Garantir que o DataFrame de opções tem T_anos
-df_mesa_op = df_mesa_op.copy()
-df_mesa_op['T_anos'] = df_mesa_op['vencimento_dias_uteis'] / 252
-
 with st.spinner("Calculando as cinco variantes (Delta, Delta-Gamma, Full Val Hist, MC vol const, MC vega-aware)..."):
+
     r_delta = var_opcoes_delta(
         df_mesa_op, cov_amostral,
         nivel_confianca=params['nivel_confianca'],
         horizonte_dias=params['horizonte_dias'],
         taxa_juros=params['taxa_juros']
     )
-    r_dg = var_opcoes_delta_gamma(
-        df_mesa_op, retornos,
-        nivel_confianca=params['nivel_confianca'],
-        horizonte_dias=params['horizonte_dias'],
-        taxa_juros=params['taxa_juros'],
-        n_simulacoes=params['n_simulacoes'], seed=42
-    )
-    r_fvh = var_opcoes_full_valuation_historico(
-        df_mesa_op, retornos,
-        nivel_confianca=params['nivel_confianca'],
-        horizonte_dias=params['horizonte_dias'],
-        taxa_juros=params['taxa_juros']
-    )
-    r_mc_const = var_opcoes_montecarlo(
-        df_mesa_op, retornos,
-        nivel_confianca=params['nivel_confianca'],
-        horizonte_dias=params['horizonte_dias'],
-        taxa_juros=params['taxa_juros'],
-        n_simulacoes=params['n_simulacoes'],
-        chocar_vol=False, seed=42
-    )
-    r_mc_vega = var_opcoes_montecarlo(
-        df_mesa_op, retornos,
-        nivel_confianca=params['nivel_confianca'],
-        horizonte_dias=params['horizonte_dias'],
-        taxa_juros=params['taxa_juros'],
-        n_simulacoes=params['n_simulacoes'],
-        chocar_vol=True, vol_choque_anual=0.10, seed=42
-    )
 
-# Tabela de resultados
+    try:
+        r_dg = var_opcoes_delta_gamma(
+            df_mesa_op, retornos,
+            nivel_confianca=params['nivel_confianca'],
+            horizonte_dias=params['horizonte_dias'],
+            taxa_juros=params['taxa_juros'],
+            n_simulacoes=params['n_simulacoes'], seed=42
+        )
+    except ValueError as e:
+        st.error(f"**Delta-Gamma:** {e}")
+        st.stop()
+
+    try:
+        r_fvh = var_opcoes_full_valuation_historico(
+            df_mesa_op, retornos,
+            nivel_confianca=params['nivel_confianca'],
+            horizonte_dias=params['horizonte_dias'],
+            taxa_juros=params['taxa_juros']
+        )
+    except ValueError as e:
+        st.error(f"**Full Valuation Histórico:** {e}")
+        st.stop()
+
+    try:
+        r_mc_const = var_opcoes_montecarlo(
+            df_mesa_op, retornos,
+            nivel_confianca=params['nivel_confianca'],
+            horizonte_dias=params['horizonte_dias'],
+            taxa_juros=params['taxa_juros'],
+            n_simulacoes=params['n_simulacoes'],
+            chocar_vol=False, seed=42
+        )
+        r_mc_vega = var_opcoes_montecarlo(
+            df_mesa_op, retornos,
+            nivel_confianca=params['nivel_confianca'],
+            horizonte_dias=params['horizonte_dias'],
+            taxa_juros=params['taxa_juros'],
+            n_simulacoes=params['n_simulacoes'],
+            chocar_vol=True, vol_choque_anual=0.10, seed=42
+        )
+    except ValueError as e:
+        st.error(f"**Monte Carlo:** {e}")
+        st.stop()
+
+# ── Tabela de resultados ───────────────────────────────────
 comparacao = pd.DataFrame([
-    {'Abordagem': r_delta['metodologia'], 'VaR (R$)': r_delta['var_financeiro']},
-    {'Abordagem': r_dg['metodologia'], 'VaR (R$)': r_dg['var_financeiro']},
-    {'Abordagem': r_fvh['metodologia'], 'VaR (R$)': r_fvh['var_financeiro']},
+    {'Abordagem': r_delta['metodologia'],    'VaR (R$)': r_delta['var_financeiro']},
+    {'Abordagem': r_dg['metodologia'],       'VaR (R$)': r_dg['var_financeiro']},
+    {'Abordagem': r_fvh['metodologia'],      'VaR (R$)': r_fvh['var_financeiro']},
     {'Abordagem': r_mc_const['metodologia'], 'VaR (R$)': r_mc_const['var_financeiro']},
-    {'Abordagem': r_mc_vega['metodologia'], 'VaR (R$)': r_mc_vega['var_financeiro']},
+    {'Abordagem': r_mc_vega['metodologia'],  'VaR (R$)': r_mc_vega['var_financeiro']},
 ])
-if r_delta['var_financeiro'] > 0:
-    comparacao['Razão vs. Delta'] = comparacao['VaR (R$)'] / r_delta['var_financeiro']
-else:
-    comparacao['Razão vs. Delta'] = np.nan
+comparacao['Razão vs. Delta'] = (
+    comparacao['VaR (R$)'] / r_delta['var_financeiro']
+    if r_delta['var_financeiro'] > 0 else np.nan
+)
 comparacao['% Limite'] = comparacao['VaR (R$)'] / limite_op * 100
 
 st.dataframe(
@@ -228,8 +288,11 @@ fig.add_hline(
     annotation_position='top right'
 )
 fig.update_layout(
-    title=f"VaR {params['nivel_confianca']*100:.0f}% — {mesa_op}<br>" +
-          "<sub>A aproximação Delta subestima sistematicamente em carteiras com gamma significativo</sub>",
+    title=(
+        f"VaR {params['nivel_confianca']*100:.0f}% — {mesa_op}<br>"
+        "<sub>A aproximação Delta subestima sistematicamente em carteiras "
+        "com gamma significativo</sub>"
+    ),
     yaxis_title='VaR (R$)',
     template='plotly_white', height=480, showlegend=False
 )
@@ -288,25 +351,28 @@ st.divider()
 st.subheader("📋 Recomendação Metodológica")
 
 gamma_total = sum(df_greeks['Γ Gamma (R$/(+1%S)²)'])
-vega_total = sum(df_greeks['ν Vega (R$/+1%vol)'])
+vega_total  = sum(df_greeks['ν Vega (R$/+1%vol)'])
+
+if r_delta['var_financeiro'] > 0:
+    razao_mc_delta = r_mc_vega['var_financeiro'] / r_delta['var_financeiro']
+else:
+    razao_mc_delta = float('nan')
 
 if abs(gamma_total) > 1000 or abs(vega_total) > 1000:
-    st.warning(f"""
-    ⚠️ **A mesa {mesa_op} apresenta sensibilidades não-lineares significativas:**
-
-    - **Gamma agregado:** R$ {gamma_total:,.2f} por (+1%S)²
-    - **Vega agregado:** R$ {vega_total:,.2f} por +1pp vol
-
-    **Recomendação:** adotar **Monte Carlo vega-aware** como métrica oficial
-    (VaR = R$ {r_mc_vega['var_financeiro']:,.2f}). A aproximação Delta-Only
-    subestima o risco em {r_mc_vega['var_financeiro']/r_delta['var_financeiro']:.1f}× neste caso —
-    inaceitável para reporte ao comitê de risco.
-    """)
+    st.warning(
+        f"⚠️ **A mesa {mesa_op} apresenta sensibilidades não-lineares significativas:**\n\n"
+        f"- **Gamma agregado:** R$ {gamma_total:,.2f} por (+1%S)²\n"
+        f"- **Vega agregado:** R$ {vega_total:,.2f} por +1pp vol\n\n"
+        f"**Recomendação:** adotar **Monte Carlo vega-aware** como métrica oficial "
+        f"(VaR = R$ {r_mc_vega['var_financeiro']:,.2f}). A aproximação Delta-Only "
+        f"subestima o risco em {razao_mc_delta:.1f}× neste caso — "
+        f"inaceitável para reporte ao comitê de risco."
+    )
 else:
-    st.success("""
-    ✅ A mesa tem sensibilidades não-lineares moderadas. Delta-Gamma ou
-    Full Valuation Histórico são adequados como métrica de gestão diária.
-    """)
+    st.success(
+        "✅ A mesa tem sensibilidades não-lineares moderadas. Delta-Gamma ou "
+        "Full Valuation Histórico são adequados como métrica de gestão diária."
+    )
 
 # ============================================================
 # SALVAR
@@ -315,14 +381,14 @@ if 'resultados_opcoes' not in st.session_state:
     st.session_state['resultados_opcoes'] = {}
 
 st.session_state['resultados_opcoes'][mesa_op] = {
-    'var_delta': r_delta['var_financeiro'],
-    'var_delta_gamma': r_dg['var_financeiro'],
+    'var_delta':        r_delta['var_financeiro'],
+    'var_delta_gamma':  r_dg['var_financeiro'],
     'var_full_val_hist': r_fvh['var_financeiro'],
-    'var_mc_const': r_mc_const['var_financeiro'],
-    'var_mc_vega': r_mc_vega['var_financeiro'],
-    'var_oficial': r_mc_vega['var_financeiro'],  # MC vega-aware como oficial
-    'limite': limite_op,
-    'greeks': df_greeks.to_dict('records'),
+    'var_mc_const':     r_mc_const['var_financeiro'],
+    'var_mc_vega':      r_mc_vega['var_financeiro'],
+    'var_oficial':      r_mc_vega['var_financeiro'],
+    'limite':           limite_op,
+    'greeks':           df_greeks.to_dict('records'),
 }
 
 st.info(f"💾 Resultados de **{mesa_op}** salvos para o Dashboard Executivo.")
